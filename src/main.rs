@@ -3,19 +3,14 @@ use actix_session::{CookieSession, Session};
 use actix_files::Files;
 use serde::Deserialize;
 use std::env;
+use std::collections::HashMap;
 use rspotify::client::Spotify;
 use rspotify::oauth2::{SpotifyOAuth, SpotifyClientCredentials, TokenInfo};
+use rspotify::model::{artist::*, track::*};
 use rspotify::util;
 
 struct AppState {
     spotify_oauth: SpotifyOAuth,
-}
-
-#[derive(Debug, Deserialize)]
-struct SpotifyCallback {
-    state: String,
-    code: Option<String>,
-    error: Option<String>,
 }
 
 #[get("/auth")]
@@ -28,22 +23,11 @@ async fn spotify_redir(data: web::Data<AppState>) -> impl Responder {
         .into_body()
 }
 
-#[get("/analysis")]
-async fn analysis(data: web::Data<AppState>, session: Session) -> Result<impl Responder, Error> {
-    let token_info: TokenInfo = match session.get::<TokenInfo>("token_info")? {
-        Some(token_info) => token_info,
-        None => return Ok("Not logged in".to_owned()),
-    };
-    println!("{:?}", token_info);
-    let client_credential = SpotifyClientCredentials::default()
-        .token_info(token_info)
-        .build();
-    let spotify = Spotify::default()
-        .client_credentials_manager(client_credential)
-        .build();
-    let tracks = spotify.current_user_saved_tracks(10, 0).await;
-    println!("{:?}", tracks)
-    Ok(format!("{:?}", tracks))
+#[derive(Debug, Deserialize)]
+struct SpotifyCallback {
+    state: String,
+    code: Option<String>,
+    error: Option<String>,
 }
 
 #[get("/spotify")]
@@ -77,6 +61,51 @@ async fn spotify_callback(
         .into_body())
 }
 
+#[get("/analysis")]
+async fn analysis(session: Session) -> Result<Either<impl Responder, impl Responder>, Error> {
+    let token_info: TokenInfo = match session.get::<TokenInfo>("token_info")? {
+        Some(token_info) => token_info,
+        None => return Ok(Either::A("Not logged in".to_owned())),
+    };
+    println!("{:?}", token_info);
+    let client_credential = SpotifyClientCredentials::default()
+        .token_info(token_info)
+        .build();
+    let spotify = Spotify::default()
+        .client_credentials_manager(client_credential)
+        .build();
+    let tracks = spotify.current_user_saved_tracks(10, 0).await?.items;
+    // TODO: optimize this whole thing
+    let artist_ids: Vec<String> = tracks
+        .iter()
+        .flat_map(|track| &track.track.artists)
+        // drop id's that are Option::none
+        // &String -> String via id.clone()
+        .flat_map(|artist| artist.id.as_ref().map(|id| id.clone()))
+        .collect();
+    let artists = spotify.artists(artist_ids).await?.artists;
+    let artist_genres: HashMap<String, &Vec<String>> = artists // [artist_uri:genres]
+        .iter()
+        .map(|artist| (artist.uri.clone(), &artist.genres))
+        .collect();
+    let track_genres: HashMap<String, Vec<String>> = tracks // [track_uri:genres]
+        .iter()
+        .map(|track| {
+            let genres: Vec<String> = track.track.artists
+                .iter()
+                .flat_map(|artist| {
+                    // TODO: reduce copies
+                    let artist_uri: String = artist.uri.clone().unwrap();
+                    let genres: Vec<String> = artist_genres.get(&artist_uri).clone().unwrap().to_vec();
+                    return genres;
+                })
+                .collect();
+            (track.track.name.clone(), genres)
+        })
+        .collect();
+    Ok(Either::B(HttpResponse::Ok().json(track_genres)))
+}
+
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
     env::set_var("RUST_LOG", "actix_web=debug,actix_server=info");
@@ -94,8 +123,8 @@ async fn main() -> std::io::Result<()> {
             .wrap(CookieSession::signed(&[0; 32]).secure(false))
             .data(app_state)
             .service(spotify_redir)
-            .service(analysis)
             .service(spotify_callback)
+            .service(analysis)
             .service(Files::new("/", "./public").index_file("index.html"))
     })
     .bind("0.0.0.0:8080")?
