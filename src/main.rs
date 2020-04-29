@@ -75,7 +75,6 @@ async fn analysis(session: Session) -> Result<Either<impl Responder, impl Respon
         .client_credentials_manager(client_credential)
         .build();
     let tracks = spotify.current_user_saved_tracks(10, 0).await?.items;
-    // TODO: optimize this whole thing
     let artist_ids: Vec<String> = tracks
         .iter()
         .flat_map(|track| &track.track.artists)
@@ -84,23 +83,22 @@ async fn analysis(session: Session) -> Result<Either<impl Responder, impl Respon
         .flat_map(|artist| artist.id.as_ref().map(|id| id.clone()))
         .collect();
     let artists = spotify.artists(artist_ids).await?.artists;
-    let artist_genres: HashMap<String, &Vec<String>> = artists // [artist_uri:genres]
+    let artist_genres: HashMap<&String, &Vec<String>> = artists // [artist_uri:genres]
         .iter()
-        .map(|artist| (artist.uri.clone(), &artist.genres))
+        .map(|artist| (&artist.uri, &artist.genres))
         .collect();
-    let track_genres: HashMap<String, Vec<String>> = tracks // [track_uri:genres]
+    let track_genres: HashMap<&String, Vec<&String>> = tracks // [track_uri:genres]
         .iter()
         .map(|track| {
-            let genres: Vec<String> = track.track.artists
+            let genres: Vec<&String> = track.track.artists
                 .iter()
                 .flat_map(|artist| {
-                    // TODO: reduce copies
-                    let artist_uri: String = artist.uri.clone().unwrap();
-                    let genres: Vec<String> = artist_genres.get(&artist_uri).clone().unwrap().to_vec();
+                    let artist_uri: &String = artist.uri.as_ref().unwrap();
+                    let genres: &Vec<String> = artist_genres.get(artist_uri).unwrap();
                     return genres;
                 })
                 .collect();
-            (track.track.name.clone(), genres)
+            (&track.track.name, genres)
         })
         .collect();
     Ok(Either::B(HttpResponse::Ok().json(track_genres)))
