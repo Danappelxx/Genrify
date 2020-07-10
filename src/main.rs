@@ -1,5 +1,6 @@
 use actix_web::{get, middleware::Logger, web, App, HttpServer, HttpResponse, Error, http, Responder, Either};
 use actix_session::{CookieSession, Session};
+use std::time::Instant;
 use actix_files::Files;
 use serde::{Serialize, Deserialize};
 use std::env;
@@ -76,7 +77,9 @@ struct UserAnalysis {
     total: u32,
 }
 
-async fn fetch_user_analysis(spotify: Spotify, limit: u32, offset: u32) -> Result<UserAnalysis, Error> {
+async fn fetch_user_analysis(spotify: Spotify, limit: Option<u32>, offset: Option<u32>) -> Result<UserAnalysis, Error> {
+    const REQUEST_LIMIT: usize = 50;
+
     let page = spotify.current_user_saved_tracks(limit, offset).await?;
     let tracks = page.items;
     let artist_ids: Vec<String> = tracks
@@ -86,7 +89,11 @@ async fn fetch_user_analysis(spotify: Spotify, limit: u32, offset: u32) -> Resul
         // drop id's that are Option::none
         .flat_map(|artist| artist.id.as_ref().map(|id| id.clone()))
         .collect();
-    let artists = spotify.artists(artist_ids).await?.artists;
+    let chunked_artists = artist_ids.chunks(REQUEST_LIMIT);
+    let mut artists = Vec::new();
+    for chunk in chunked_artists {
+        artists.append(&mut spotify.artists(chunk.to_vec()).await?.artists);
+    }
     let artist_genres: HashMap<&String, &Vec<String>> = artists // [artist_uri:genres]
         .iter()
         .map(|artist| (&artist.uri, &artist.genres))
@@ -151,14 +158,20 @@ async fn fetch_user_analysis(spotify: Spotify, limit: u32, offset: u32) -> Resul
         .collect();
     Ok(UserAnalysis {
         tracks: tracks_analysis,
-        limit,
-        offset,
+        limit: page.limit,
+        offset: page.offset,
         total: page.total,
     })
 }
 
+#[derive(Debug, Deserialize)]
+struct AnalysisQuery {
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+
 #[get("/analysis")]
-async fn analysis(session: Session) -> Result<Either<impl Responder, impl Responder>, Error> {
+async fn analysis(session: Session, paging: web::Query<AnalysisQuery>) -> Result<Either<impl Responder, impl Responder>, Error> {
     let token_info: TokenInfo = match session.get::<TokenInfo>("token_info")? {
         Some(token_info) => token_info,
         None => return Ok(Either::A(HttpResponse::Unauthorized()
@@ -171,7 +184,10 @@ async fn analysis(session: Session) -> Result<Either<impl Responder, impl Respon
     let spotify = Spotify::default()
         .client_credentials_manager(client_credential)
         .build();
-    let user_analysis = fetch_user_analysis(spotify, 10, 0).await?;
+    let start = Instant::now();
+    let user_analysis = fetch_user_analysis(spotify, paging.limit, paging.offset).await?;
+    let end = Instant::now();
+    println!("fetched user analysis in {:?}", end - start);
     Ok(Either::B(HttpResponse::Ok().json(user_analysis)))
 }
 
