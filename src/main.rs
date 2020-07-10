@@ -1,12 +1,12 @@
 use actix_web::{get, middleware::Logger, web, App, HttpServer, HttpResponse, Error, http, Responder, Either};
 use actix_session::{CookieSession, Session};
 use actix_files::Files;
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 use std::env;
 use std::collections::HashMap;
 use rspotify::client::Spotify;
 use rspotify::oauth2::{SpotifyOAuth, SpotifyClientCredentials, TokenInfo};
-use rspotify::model::{artist::*, track::*};
+use rspotify::model::{track::*, audio::*};
 use rspotify::util;
 
 struct AppState {
@@ -61,25 +61,29 @@ async fn spotify_callback(
         .into_body())
 }
 
-#[get("/analysis")]
-async fn analysis(session: Session) -> Result<Either<impl Responder, impl Responder>, Error> {
-    let token_info: TokenInfo = match session.get::<TokenInfo>("token_info")? {
-        Some(token_info) => token_info,
-        None => return Ok(Either::A("Not logged in".to_owned())),
-    };
-    println!("{:?}", token_info);
-    let client_credential = SpotifyClientCredentials::default()
-        .token_info(token_info)
-        .build();
-    let spotify = Spotify::default()
-        .client_credentials_manager(client_credential)
-        .build();
-    let tracks = spotify.current_user_saved_tracks(10, 0).await?.items;
+#[derive(Debug, Serialize)]
+struct TrackAnalysis {
+    track: SavedTrack,
+    genres: Vec<String>,
+    audio_features: AudioFeatures,
+}
+
+#[derive(Debug, Serialize)]
+struct UserAnalysis {
+    tracks: Vec<TrackAnalysis>,
+    limit: u32,
+    offset: u32,
+    total: u32,
+}
+
+async fn fetch_user_analysis(spotify: Spotify, limit: u32, offset: u32) -> Result<UserAnalysis, Error> {
+    let page = spotify.current_user_saved_tracks(limit, offset).await?;
+    let tracks = page.items;
     let artist_ids: Vec<String> = tracks
         .iter()
+        // flatten Vec<Vec<Artist>> to Vec<Artist>
         .flat_map(|track| &track.track.artists)
         // drop id's that are Option::none
-        // &String -> String via id.clone()
         .flat_map(|artist| artist.id.as_ref().map(|id| id.clone()))
         .collect();
     let artists = spotify.artists(artist_ids).await?.artists;
@@ -87,7 +91,7 @@ async fn analysis(session: Session) -> Result<Either<impl Responder, impl Respon
         .iter()
         .map(|artist| (&artist.uri, &artist.genres))
         .collect();
-    let track_genres: HashMap<&String, Vec<&String>> = tracks // [track_uri:genres]
+    let mut track_genres: HashMap<&String, Vec<&String>> = tracks // [track_uri:genres]
         .iter()
         .map(|track| {
             let genres: Vec<&String> = track.track.artists
@@ -98,10 +102,77 @@ async fn analysis(session: Session) -> Result<Either<impl Responder, impl Respon
                     return genres;
                 })
                 .collect();
-            (&track.track.name, genres)
+            (&track.track.uri, genres)
         })
         .collect();
-    Ok(Either::B(HttpResponse::Ok().json(track_genres)))
+    let track_id_map: HashMap<String, &SavedTrack> = tracks
+        .iter()
+        .flat_map(|track| {
+            let id = match &track.track.id {
+                Some(id) => id,
+                None => return None,
+            };
+            Some((id.clone(), track))
+        })
+        .collect();
+    let track_ids: Vec<String> = track_id_map.keys().cloned().collect();
+    let mut audios_features: HashMap<String, AudioFeatures> = spotify.audios_features(&track_ids[..]).await?
+        .map(|features| features.audio_features)
+        .unwrap_or(Vec::new())
+        .into_iter()
+        .flat_map(|features| {
+            Some((features.id.clone(), features))
+        })
+        .collect();
+    let tracks_analysis = tracks
+        .iter()
+        .flat_map(|track| {
+            let track_id = match &track.track.id {
+                Some(id) => id,
+                None => return None,
+            };
+            // we remove from track_genres so we don't have to clone
+            let genres = track_genres.remove(&track.track.uri)
+                .unwrap_or(Vec::new())
+                .into_iter()
+                .cloned()
+                .collect();
+            // // we remove from audios_features so we don't have to clone
+            let audio_features = match audios_features.remove(track_id) {
+                Some(features) => features,
+                None => return None,
+            };
+            Some(TrackAnalysis {
+                track: track.clone(),
+                genres,
+                audio_features,
+            })
+        })
+        .collect();
+    Ok(UserAnalysis {
+        tracks: tracks_analysis,
+        limit,
+        offset,
+        total: page.total,
+    })
+}
+
+#[get("/analysis")]
+async fn analysis(session: Session) -> Result<Either<impl Responder, impl Responder>, Error> {
+    let token_info: TokenInfo = match session.get::<TokenInfo>("token_info")? {
+        Some(token_info) => token_info,
+        None => return Ok(Either::A(HttpResponse::Unauthorized()
+            .body("Not logged in.".to_owned()))),
+    };
+    println!("{:?}", token_info);
+    let client_credential = SpotifyClientCredentials::default()
+        .token_info(token_info)
+        .build();
+    let spotify = Spotify::default()
+        .client_credentials_manager(client_credential)
+        .build();
+    let user_analysis = fetch_user_analysis(spotify, 10, 0).await?;
+    Ok(Either::B(HttpResponse::Ok().json(user_analysis)))
 }
 
 #[actix_rt::main]
