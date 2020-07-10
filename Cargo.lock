@@ -857,21 +857,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "genrify"
-version = "0.1.0"
-dependencies = [
- "actix-files",
- "actix-rt",
- "actix-session",
- "actix-web",
- "env_logger 0.7.1",
- "json",
- "rspotify",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1038,6 +1023,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "076f042c5b7b98f31d205f1249267e12a6518c1481e9dae9764af19b707d2292"
 dependencies = [
  "autocfg 1.0.0",
+]
+
+[[package]]
+name = "intellify"
+version = "0.1.0"
+dependencies = [
+ "actix-files",
+ "actix-rt",
+ "actix-session",
+ "actix-web",
+ "env_logger 0.7.1",
+ "json",
+ "rspotify",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

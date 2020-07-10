@@ -1,5 +1,5 @@
 [package]
-name = "genrify"
+name = "intellify"
 version = "0.1.0"
 authors = ["Dan Appel <dan.appel00@gmail.com>"]
 edition = "2018"
